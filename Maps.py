@@ -9,7 +9,7 @@ import uvicorn
 import asyncio
 
 # Налаштування
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN = os.environ.get("8648491410:AAEmN3o_hRZwnMOsOcqMDgKjP-mIvjV5yBs")
 MONGO_URL = os.environ.get("MONGO_URL")
 DB_NAME = "lviv_map"
 
