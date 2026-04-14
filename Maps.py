@@ -15,14 +15,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import uvicorn
 import threading
+import motor.motor_asyncio
 
 # ================== НАЛАШТУВАННЯ ==================
 API_TOKEN = "8648491410:AAEmN3o_hRZwnMOsOcqMDgKjP-mIvjV5yBs"
 ADMINS = [5242383397, 131787513, 393692670]
 TIMEZONE = "Europe/Kyiv"
-DATA_FILE = "points.json"
 
-# Конфігурація типів подій та їх кольорів
+# Твій рядок підключення до MongoDB Atlas
+MONGO_URL = "mongodb+srv://drivedrive700_db_user:QsGqw07nEfdKQo99@cluster0.ephhnba.mongodb.net/?appName=Cluster0"
+
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+db = client.road_map_db
+collection = db.points
+
 CONFIG = {
     "🚗 ДТП": "red",
     "🚧 Роботи": "orange",
@@ -42,71 +48,40 @@ class MapState(StatesGroup):
     waiting_second_point = State() 
     waiting_comment = State()
 
-# ================== ДОПОМІЖНІ ФУНКЦІЇ ==================
-
-def save_point(data):
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            current_data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        current_data = []
-    
-    current_data.append(data)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(current_data, f, ensure_ascii=False, indent=4)
-
-async def parse_coords(text):
-    # Пошук координат у тексті або посиланнях (Google/Apple Maps)
-    pattern = r'([-+]?\d+\.\d+)[,\s]+([-+]?\d+\.\d+)'
-    match = re.search(pattern, text)
-    if match:
-        return float(match.group(1)), float(match.group(2))
-    return None
-
 # ================== КЛАВІАТУРИ ==================
 
 def get_main_kb():
     keys = list(CONFIG.keys())
-    # Створюємо кнопки по 2 в ряд
     buttons = [[KeyboardButton(text=keys[i]), KeyboardButton(text=keys[i+1])] for i in range(0, len(keys)-1, 2)]
     if len(keys) % 2 != 0: buttons.append([KeyboardButton(text=keys[-1])])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_location_kb():
-    kb = [
+    return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="📍 Надіслати мою локацію", request_location=True)],
-        [KeyboardButton(text="🗺 Інструкція: вибрати на карті")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+        [KeyboardButton(text="🗺 Інструкція")]
+    ], resize_keyboard=True)
 
 # ================== ЛОГІКА БОТА ==================
 
 @dp.message(Command("start"), F.from_user.id.in_(ADMINS))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Оберіть тип події на дорозі:", reply_markup=get_main_kb())
+    await message.answer("Оберіть подію на дорозі:", reply_markup=get_main_kb())
     await state.set_state(MapState.choosing_type)
 
 @dp.message(MapState.choosing_type)
 async def process_type(message: types.Message, state: FSMContext):
-    choice = message.text.strip()
-    if choice not in CONFIG:
-        return await message.answer("Будь ласка, оберіть категорію з кнопок.")
+    if message.text not in CONFIG:
+        return await message.answer("Використовуйте кнопки меню.")
     
-    await state.update_data(type_label=choice, color=CONFIG[choice])
+    await state.update_data(type_label=message.text, color=CONFIG[message.text])
+    mode = "line" if message.text == "📏 Лінія" else "point"
+    await state.update_data(mode=mode)
     
-    if choice == "📏 Лінія":
-        await state.update_data(mode="line")
-        await message.answer("Надішліть ПЕРШУ точку (локація, посилання або шпилька):", reply_markup=get_location_kb())
-    else:
-        await state.update_data(mode="point")
-        await message.answer(f"Обрано: {choice}. Тепер надішліть локацію:", reply_markup=get_location_kb())
-    
+    msg = "Надішліть ПЕРШУ точку ділянки:" if mode == "line" else "Надішліть локацію (кнопка 📍 або шпилька):"
+    await message.answer(msg, reply_markup=get_location_kb())
     await state.set_state(MapState.waiting_location)
-
-@dp.message(MapState.waiting_location, F.text == "🗺 Інструкція: вибрати на карті")
-async def loc_help(message: types.Message):
-    await message.answer("Щоб вибрати точку вручну:\n1. Натисніть 📎 (скріпку)\n2. Оберіть 'Локація'\n3. Перетягніть маркер у потрібне місце і натисніть 'Надіслати'")
 
 @dp.message(MapState.waiting_location, F.location | F.text)
 async def handle_first_point(message: types.Message, state: FSMContext):
@@ -114,16 +89,15 @@ async def handle_first_point(message: types.Message, state: FSMContext):
     if message.location:
         lat, lon = message.location.latitude, message.location.longitude
     elif message.text:
-        coords = await parse_coords(message.text)
-        if coords: lat, lon = coords
+        match = re.search(r'([-+]?\d+\.\d+)[,\s]+([-+]?\d+\.\d+)', message.text)
+        if match: lat, lon = float(match.group(1)), float(match.group(2))
 
-    if lat is None:
-        return await message.answer("Не вдалося розпізнати координати. Надішліть локацію або посилання ще раз.")
+    if lat is None: return await message.answer("Координати не розпізнано. Спробуйте ще раз.")
 
     data = await state.get_data()
-    if data.get('mode') == "point":
+    if data['mode'] == "point":
         await state.update_data(coords=[lat, lon])
-        await message.answer("Додайте коментар (опис):", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("Напишіть коментар (опис):", reply_markup=types.ReplyKeyboardRemove())
         await state.set_state(MapState.waiting_comment)
     else:
         await state.update_data(point1=[lat, lon])
@@ -136,13 +110,12 @@ async def handle_second_point(message: types.Message, state: FSMContext):
     if message.location:
         lat, lon = message.location.latitude, message.location.longitude
     elif message.text:
-        coords = await parse_coords(message.text)
-        if coords: lat, lon = coords
+        match = re.search(r'([-+]?\d+\.\d+)[,\s]+([-+]?\d+\.\d+)', message.text)
+        if match: lat, lon = float(match.group(1)), float(match.group(2))
 
-    if lat is None: return await message.answer("Надішліть координати другої точки.")
-
+    if lat is None: return await message.answer("Надішліть другу точку ще раз.")
     await state.update_data(point2=[lat, lon])
-    await message.answer("Додайте опис ділянки:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Напишіть коментар для цієї ділянки:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(MapState.waiting_comment)
 
 @dp.message(MapState.waiting_comment)
@@ -154,45 +127,34 @@ async def finalize(message: types.Message, state: FSMContext):
         "type": user_data['type_label'],
         "description": message.text,
         "time": now,
-        "color": user_data['color']
+        "color": user_data['color'],
+        "geom_type": user_data['mode'],
+        "coords": user_data['coords'] if user_data['mode'] == "point" else [user_data['point1'], user_data['point2']]
     }
     
-    if user_data['mode'] == "point":
-        entry["coords"] = user_data['coords']
-        entry["geom_type"] = "point"
-    else:
-        entry["coords"] = [user_data['point1'], user_data['point2']]
-        entry["geom_type"] = "line"
-    
-    save_point(entry)
-    await message.answer(f"✅ Успішно додано: {user_data['type_label']}\nМапа оновиться автоматично.")
+    await collection.insert_one(entry)
+    await message.answer(f"✅ Додано в базу! Мапа оновлюється.")
     await state.clear()
 
-# ================== СЕРВЕР ==================
+# ================== СЕРВЕР (FASTAPI) ==================
 
 @app.get("/", response_class=HTMLResponse)
 async def get_map():
     try:
-        with open("index.html", "r", encoding="utf-8") as f:
+        with open("index.html", "r", encoding="utf-8") as f: 
             return f.read()
-    except FileNotFoundError:
-        return "<h1>Файл index.html не знайдено</h1>"
+    except:
+        return "Файл index.html не знайдено."
 
 @app.get("/data")
 async def get_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except: return []
+    cursor = collection.find({}, {"_id": 0})
+    return await cursor.to_list(length=1000)
 
 async def run_bot():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    def run_server():
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
-
-    threading.Thread(target=run_server, daemon=True).start()
-    print("🚀 Бот і сервер запущені!")
+    # Запуск сервера та бота в різних потоках
+    threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=8000), daemon=True).start()
     asyncio.run(run_bot())
-
