@@ -1,71 +1,88 @@
-import logging
-import asyncio
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.client.default import DefaultBotProperties
+import re
+import datetime
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi import FastAPI
 import uvicorn
-import threading
-import motor.motor_asyncio
+import asyncio
 
-# Логування, щоб ми бачили помилки в консолі Render
-logging.basicConfig(level=logging.INFO)
+# Налаштування
+TOKEN = os.environ.get("BOT_TOKEN")
+MONGO_URL = os.environ.get("MONGO_URL")
+DB_NAME = "lviv_map"
 
-API_TOKEN = "8648491410:AAEmN3o_hRZwnMOsOcqMDgKjP-mIvjV5yBs"
-ADMINS = [5242383397, 131787513, 393692670]
-
-# Твій рядок підключення до MongoDB
-MONGO_URL = "mongodb+srv://drivedrive700_db_user:QsGqw07nEfdKQo99@cluster0.ephhnba.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-
-try:
-    client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
-    db = client.road_map_db
-    collection = db.points
-    logging.info("Підключення до MongoDB ініційовано")
-except Exception as e:
-    logging.error(f"Помилка MongoDB: {e}")
-
-app = FastAPI()
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
+app = FastAPI()
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-@app.get("/", response_class=HTMLResponse)
-async def get_map():
-    try:
-        with open("index.html", "r", encoding="utf-8") as f:
-            return f.read()
-    except:
-        return "Карта скоро буде тут..."
-
-@app.get("/data")
-async def get_data():
-    cursor = collection.find({}, {"_id": 0})
-    return await cursor.to_list(length=1000)
+# Допоміжна функція для витягування координат з посилань Google Maps
+def extract_coords(text):
+    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', text)
+    if match:
+        return float(match.group(1)), float(match.group(2))
+    return None
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if message.from_user.id in ADMINS:
-        await message.answer("Привіт! Бот працює. Надішли локацію, щоб додати точку.")
+    await message.answer("Привіт! Надішли мені локацію (поточну, вибрану на карті або посилання Google Maps), і я додам її на мапу.")
+
+# ОБРОБКА ЛОКАЦІЇ (Поточна або вибрана на карті)
+@dp.message(F.location)
+async def handle_location(message: types.Message):
+    lat = message.location.latitude
+    lng = message.location.longitude
+    
+    point = {
+        "type": "Подія",
+        "description": "Локація додана через Telegram",
+        "time": datetime.datetime.now().strftime("%H:%M"),
+        "coords": [lat, lng],
+        "color": "orange",
+        "geom_type": "point"
+    }
+    
+    await db.points.insert_one(point)
+    await message.answer(f"✅ Точка додана! Координати: {lat}, {lng}")
+
+# ОБРОБКА ТЕКСТУ (Посилання Google Maps)
+@dp.message(F.text)
+async def handle_text(message: types.Message):
+    coords = extract_coords(message.text)
+    if coords:
+        lat, lng = coords
+        point = {
+            "type": "Точка за посиланням",
+            "description": "Додано через Google Maps link",
+            "time": datetime.datetime.now().strftime("%H:%M"),
+            "coords": [lat, lng],
+            "color": "blue",
+            "geom_type": "point"
+        }
+        await db.points.insert_one(point)
+        await message.answer(f"✅ Точка з посилання додана: {lat}, {lng}")
     else:
-        await message.answer("У вас немає доступу.")
+        await message.answer("Я не знайшов координат у повідомленні. Надішліть локацію або посилання Google Maps.")
+
+# Ендпоінт для карти
+@app.get("/data")
+async def get_data():
+    points = await db.points.find().to_list(1000)
+    for p in points:
+        p["_id"] = str(p["_id"])
+    return points
 
 async def main():
-    # Запуск бота і сервера разом
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000)
+    # Запуск бота в фоні
+    asyncio.create_task(dp.start_polling(bot))
+    # Запуск веб-сервера
+    port = int(os.environ.get("PORT", 8000))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port)
     server = uvicorn.Server(config)
-    
-    # Запускаємо сервер у фоні, а бота в основному потоці
-    await asyncio.gather(
-        server.serve(),
-        dp.start_polling(bot)
-    )
+    await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())
