@@ -8,44 +8,83 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         #map { height: 100vh; width: 100%; }
-        body { margin: 0; }
+        body { margin: 0; padding: 0; }
+        
+        /* Стиль для гарного відображення попапів */
+        .leaflet-popup-content-wrapper {
+            border-radius: 8px;
+            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+        }
+        .leaflet-popup-content b {
+            font-size: 1.1em;
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div id="map"></div>
     <script>
-        // Центруємо карту на Львові (координати 49.84, 24.03)
+        // Центруємо карту на Львові
         var map = L.map('map').setView([49.8397, 24.0297], 13);
 
+        // Підключаємо шар карти (OpenStreetMap)
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
 
+        // --- НАЛАШТУВАННЯ КОЛЬОРОВИХ ШПИЛЬОК ---
+        // Створюємо базовий клас для іконки, щоб не дублювати код
+        var LeafIcon = L.Icon.extend({
+            options: {
+                shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png', // Стандартна тінь
+                iconSize:     [25, 41], // Розмір шпильки
+                shadowSize:   [41, 41], // Розмір тіні
+                iconAnchor:   [12, 41], // Точка, якою шпилька "стоїть" на карті
+                shadowAnchor: [12, 41], // Точка якоря для тіні
+                popupAnchor:  [1, -34]  // Точка, з якої "виростає" попап
+            }
+        });
+
+        // Створюємо готові іконки для кожного кольору, посилаючись на папку images на GitHub
+        var icons = {
+            red:    new LeafIcon({iconUrl: 'images/marker-icon-red.png'}),
+            orange: new LeafIcon({iconUrl: 'images/marker-icon-orange.png'}),
+            black:  new LeafIcon({iconUrl: 'images/marker-icon-black.png'}),
+            purple: new LeafIcon({iconUrl: 'images/marker-icon-purple.png'}),
+            blue:   new LeafIcon({iconUrl: 'images/marker-icon-blue.png'}),
+            darkred:new LeafIcon({iconUrl: 'images/marker-icon-darkred.png'})
+        };
+
+        // --- ЛОГІКА ЗАВАНТАЖЕННЯ ДАНИХ ---
         async function loadPoints() {
             try {
-                // Запитуємо дані з нашого сервера
+                // Запитуємо дані з нашого сервера Render
                 const response = await fetch('/data');
                 const points = await response.json();
                 
                 points.forEach(p => {
+                    // Визначаємо іконку за кольором, який передав бот (наприклад, 'red')
+                    // Якщо колір не знайдено, використовуємо стандартний синій
+                    var currentIcon = icons[p.color] || icons.blue;
+
                     if (p.geom_type === 'point') {
-                        L.marker(p.coords, {
-                            icon: L.divIcon({
-                                className: 'custom-div-icon',
-                                html: `<div style="background-color:${p.color}; width:15px; height:15px; border-radius:50%; border:2px solid white;"></div>`,
-                                iconSize: [15, 15]
-                            })
-                        }).addTo(map).bindPopup(`<b>${p.type}</b><br>${p.description}<br>🕒 ${p.time}`);
+                        // Додаємо маркер зі шпилькою
+                        L.marker(p.coords, {icon: currentIcon})
+                            .addTo(map)
+                            .bindPopup(`<b>${p.type}</b><br>${p.description}<br>🕒 ${p.time}`);
                     } else if (p.geom_type === 'line') {
-                        L.polyline(p.coords, {color: p.color, weight: 5}).addTo(map)
-                         .bindPopup(`<b>${p.type}</b><br>${p.description}<br>🕒 ${p.time}`);
+                        // Для ліній залишаємо кольорову лінію, бо шпилька тут не пасує
+                        L.polyline(p.coords, {color: p.color, weight: 5, opacity: 0.7})
+                            .addTo(map)
+                            .bindPopup(`<b>${p.type}</b><br>${p.description}<br>🕒 ${p.time}`);
                     }
                 });
             } catch (err) {
-                console.error("Помилка завантаження точок:", err);
+                console.error("Помилка завантаження точок з бази:", err);
             }
         }
 
+        // Запускаємо завантаження
         loadPoints();
     </script>
 </body>
