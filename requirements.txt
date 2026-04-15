@@ -4,3 +4,4 @@ uvicorn
 motor
 pymongo
 httpx
+requests
