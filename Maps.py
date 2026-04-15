@@ -26,9 +26,10 @@ class EventForm(StatesGroup):
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def extract_coords_from_url(url):
     try:
+        # requests потрібен для розгортання коротких посилань goo.gl
         response = requests.get(url, allow_redirects=True, timeout=5)
         final_url = response.url
-        # Шукаємо координати в розгорнутому посиланні
+        # Шукаємо координати у фінальному посиланні
         match = re.search(r'([-+]?\d+\.\d+),\s*([-+]?\d+\.\d+)', final_url)
         if match:
             return float(match.group(1)), float(match.group(2))
@@ -54,7 +55,7 @@ async def get_data():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Бот активний!\n\nНадішли:\n1. 📎 Локацію з телефону\n2. Посилання з Google Maps\n3. Координати текстом (напр. 49.83, 24.02)")
+    await message.answer("👋 Бот активний!\n\nНадішли:\n1. 📎 Локацію з телефону\n2. Посилання з Google Maps\n3. Координати текстом (напр. 49.83, 24.02)\n\n/undo — видалити останню точку\n/clear — очистити все")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
@@ -62,9 +63,21 @@ async def cmd_clear(message: types.Message):
         await db.points.delete_many({})
         await message.answer("🧹 Карту очищено!")
 
-# 1. ОБРОБКА ОПИСУ (Має найвищий пріоритет, коли бот чекає на текст)
+@dp.message(Command("undo"))
+async def cmd_undo(message: types.Message):
+    if db is not None:
+        # Знаходимо і видаляємо останню додану точку
+        last_point = await db.points.find_one(sort=[("_id", -1)])
+        if last_point:
+            await db.points.delete_one({"_id": last_point["_id"]})
+            await message.answer("⬅️ Останню подію видалено з карти!")
+        else:
+            await message.answer("Карта вже порожня.")
+
+# 1. ПРІОРИТЕТ: Чекаємо на опис (якщо стан активовано)
 @dp.message(EventForm.waiting_for_description)
 async def handle_description(message: types.Message, state: FSMContext):
+    # Якщо прийшла команда під час очікування опису - ігноруємо
     if not message.text or message.text.startswith('/'): return
     
     data = await state.get_data()
@@ -80,39 +93,39 @@ async def handle_description(message: types.Message, state: FSMContext):
         await message.answer("✅ Подію успішно додано на карту!")
     await state.clear()
 
-# 2. ПРЯМА ЛОКАЦІЯ (📎)
+# 2. Пряма локація (📎)
 @dp.message(F.location)
 async def handle_location(message: types.Message, state: FSMContext):
     await state.update_data(lat=message.location.latitude, lng=message.location.longitude)
     await state.set_state(EventForm.waiting_for_description)
-    await message.answer("✅ Локацію прийнято! Введіть опис події:")
+    await message.answer("✅ Локацію прийнято! Тепер напиши опис події:")
 
-# 3. ТЕКСТ ЯК ЛОКАЦІЯ (Координати або посилання)
+# 3. Текст (координати або посилання)
 @dp.message(F.text)
-async def handle_text_as_location(message: types.Message, state: FSMContext):
+async def handle_text_location(message: types.Message, state: FSMContext):
     if message.text.startswith('/'): return
-
-    lat, lng = None, None
+    
     text = message.text
+    lat, lng = None, None
 
-    # Шукаємо координати текстом (напр. 49.835213, 23.993966)
+    # Перевірка на координати (напр. 49.835213, 23.993966)
     coords_match = re.search(r'([-+]?\d+\.\d+),\s*([-+]?\d+\.\d+)', text)
     if coords_match:
         lat, lng = float(coords_match.group(1)), float(coords_match.group(2))
     
-    # Або шукаємо посилання Google Maps
+    # Перевірка на посилання
     elif "maps" in text or "goo.gl" in text:
         await message.answer("🔍 Розшифровую посилання...")
-        lat_lng = extract_coords_from_url(text)
-        if lat_lng: lat, lng = lat_lng
+        coords = extract_coords_from_url(text)
+        if coords: lat, lng = coords
 
     if lat and lng:
         await state.update_data(lat=lat, lng=lng)
+        # Встановлюємо стан очікування опису
         await state.set_state(EventForm.waiting_for_description)
-        await message.answer(f"📍 Точку знайдено: {lat}, {lng}\nТепер напиши опис події:")
+        await message.answer(f"📍 Точку знайдено: {lat}, {lng}\nТепер напиши опис події (наприклад: 'ДТП в правій смузі'):")
     else:
-        # Якщо текст не схожий ні на що, даємо підказку
-        await message.answer("❌ Не впізнаю локацію. Надішли координати (напр. 49.83, 24.02) або посилання.")
+        await message.answer("❌ Не вдалося розпізнати локацію. Надішли координати або посилання.")
 
 # --- ЗАПУСК ---
 async def main():
