@@ -23,21 +23,20 @@ db = client["lviv_map"] if client else None
 class EventForm(StatesGroup):
     waiting_for_description = State()
 
-# --- ФУНКЦІЯ ДЛЯ ПОСИЛАНЬ GOOGLE MAPS ---
-def extract_coords(url):
+# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+def extract_coords_from_url(url):
     try:
-        # Розпаковуємо коротке посилання
         response = requests.get(url, allow_redirects=True, timeout=5)
         final_url = response.url
-        # Шукаємо координати у фінальному посиланні (@lat,lng)
-        match = re.search(r'@([-+]?\d*\.\d+),([-+]?\d*\.\d+)', final_url)
+        # Шукаємо координати у форматі @lat,lng або q=lat,lng
+        match = re.search(r'([-+]?\d+\.\d+),\s*([-+]?\d+\.\d+)', final_url)
         if match:
             return float(match.group(1)), float(match.group(2))
-    except:
-        pass
+    except Exception as e:
+        print(f"Помилка розбору посилання: {e}")
     return None
 
-# --- ВЕБ-СЕРВЕР ---
+# --- ВЕБ-СЕРВЕР (ДЛЯ КАРТИ) ---
 @app.get("/")
 async def read_index(): return FileResponse('index.html')
 
@@ -51,38 +50,53 @@ async def get_data():
     for p in points: p["_id"] = str(p["_id"])
     return points
 
-# --- КОМАНДИ ---
+# --- ОБРОБКА ПОВІДОМЛЕНЬ БОТА ---
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("📍 Надішли локацію (📎) або посилання з Google Maps!")
+    await message.answer("👋 Бот активний!\n\nНадішли:\n1. 📎 Локацію з телефону\n2. Посилання з Google Maps\n3. Координати текстом (напр. 49.83, 24.02)")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
     if db is not None:
         await db.points.delete_many({})
-        await message.answer("🧹 Очищено!")
+        await message.answer("🧹 Карту очищено!")
 
-# --- ОБРОБКА ЛОКАЦІЇ ТА ПОСИЛАНЬ ---
-
-# Варіант 1: Пряма локація з телефону
+# Пряма локація (через скріпку Telegram)
 @dp.message(F.location)
 async def handle_location(message: types.Message, state: FSMContext):
     await state.update_data(lat=message.location.latitude, lng=message.location.longitude)
     await state.set_state(EventForm.waiting_for_description)
-    await message.answer("✅ Локацію прийнято! Тепер напиши опис:")
+    await message.answer("✅ Локацію прийнято! Введіть опис події:")
 
-# Варіант 2: Посилання з Google Maps (з ПК або телефону)
-@dp.message(F.text.contains("maps"))
-async def handle_link(message: types.Message, state: FSMContext):
-    coords = extract_coords(message.text)
-    if coords:
-        lat, lng = coords
+# Текст (посилання або координати)
+@dp.message(F.text)
+async def handle_text(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'): return # Ігноруємо команди
+
+    lat, lng = None, None
+    text = message.text
+
+    # Спроба 1: Шукаємо чисті координати в тексті (напр. 49.835213, 23.993966)
+    coords_match = re.search(r'([-+]?\d+\.\d+),\s*([-+]?\d+\.\d+)', text)
+    if coords_match:
+        lat, lng = float(coords_match.group(1)), float(coords_match.group(2))
+    
+    # Спроба 2: Якщо це посилання Google Maps
+    elif "maps" in text or "goo.gl" in text:
+        await message.answer("🔍 Розшифровую посилання...")
+        coords = extract_coords_from_url(text)
+        if coords:
+            lat, lng = coords
+
+    if lat and lng:
         await state.update_data(lat=lat, lng=lng)
         await state.set_state(EventForm.waiting_for_description)
-        await message.answer(f"🧩 Точку {lat}, {lng} знайдено! Напиши опис події:")
+        await message.answer(f"📍 Точку знайдено: {lat}, {lng}\nТепер напиши опис:")
     else:
-        await message.answer("❌ Не вдалося дістати координати з посилання. Спробуй ще раз.")
+        await message.answer("❌ Не вдалося розпізнати локацію. Спробуй надіслати координати як текст (цифри через кому).")
 
+# Збереження опису
 @dp.message(EventForm.waiting_for_description)
 async def handle_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -95,13 +109,18 @@ async def handle_description(message: types.Message, state: FSMContext):
             "color": "orange",
             "geom_type": "point"
         })
-        await message.answer("✅ Додано на карту!")
+        await message.answer("✅ Подію успішно додано на карту!")
     await state.clear()
 
+# --- ЗАПУСК ---
 async def main():
+    # Запуск бота у фоні
     asyncio.create_task(dp.start_polling(bot))
+    # Запуск веб-сервера на порту Render
     port = int(os.environ.get("PORT", 8000))
-    await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port)).serve()
+    config = uvicorn.Config(app, host="0.0.0.0", port=port)
+    server = uvicorn.Server(config)
+    await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())
